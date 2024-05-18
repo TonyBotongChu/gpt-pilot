@@ -392,7 +392,7 @@ def stream_gpt_completion(data, req_type, project, model=None):
     lines_printed = 2
     gpt_response = ''
     buffer = ''  # A buffer to accumulate incoming data
-    expecting_json = True
+    expecting_json = None
 
     if 'functions' in data:
         expecting_json = data['functions']
@@ -400,11 +400,9 @@ def stream_gpt_completion(data, req_type, project, model=None):
             incomplete_json = get_prompt('utils/incomplete_json.prompt', {'received_json': data['function_buffer']})
             data['messages'].append({'role': 'user', 'content': incomplete_json})
             gpt_response = data['function_buffer']
-            received_json = True
         elif 'function_error' in data:
             invalid_json = get_prompt('utils/invalid_json.prompt', {'invalid_reason': data['function_error']})
             data['messages'].append({'role': 'user', 'content': invalid_json})
-            received_json = True
 
         # Don't send the `functions` parameter to Open AI, but don't remove it from `data` in case we need to retry
         data = {key: value for key, value in data.items() if not key.startswith('function')}
@@ -441,7 +439,7 @@ def stream_gpt_completion(data, req_type, project, model=None):
     try:
         # TODO: support non-streaming api
         content = client.chat.completions.create(
-            messages=data['message'],
+            messages=data['messages'],
             model=model,
         ).choices[0].message.content
         print(content, type='stream', end='', flush=True)
@@ -482,11 +480,11 @@ def stream_gpt_completion(data, req_type, project, model=None):
             f"Request token size: {token_count} tokens. "
             f"Error message: {e.message}")
 
+    gpt_response = clean_json_response(gpt_response)
     logger.info('<<<<<<<<<< LLM Response <<<<<<<<<<\n%s\n<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<', gpt_response)
     project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], gpt_response)
 
     if expecting_json:
-        gpt_response = clean_json_response(gpt_response)
         assert_json_schema(gpt_response, expecting_json)
         # Note, we log JSON separately from the YAML log above incase the JSON is invalid and an error is raised
         project.dot_pilot_gpt.log_chat_completion_json(endpoint, model, req_type, expecting_json, gpt_response)
