@@ -1,28 +1,9 @@
 # main.py
 import builtins
-import json
 import os
 
 import sys
 import traceback
-
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    gpt_pilot_root = os.path.dirname(os.path.dirname(__file__))
-    venv_path = os.path.join(gpt_pilot_root, 'pilot-env')
-    requirements_path = os.path.join(gpt_pilot_root, 'requirements.txt')
-    if sys.prefix == sys.base_prefix:
-        venv_python_path = os.path.join(venv_path, 'scripts' if sys.platform == 'win32' else 'bin', 'python')
-        print('Python environment for GPT Pilot is not set up.')
-        print(f'Please create Python virtual environment: {sys.executable} -m venv {venv_path}')
-        print(f'Then install the required dependencies with: {venv_python_path} -m pip install -r {requirements_path}')
-    else:
-        print('Python environment for GPT Pilot is not completely set up.')
-        print(f'Please run `{sys.executable} -m pip install -r {requirements_path}` to finish Python setup, and rerun GPT Pilot.')
-    sys.exit(-1)
-
-load_dotenv(override=True)
 
 from utils.style import color_red
 from utils.custom_print import get_custom_print
@@ -42,6 +23,26 @@ from database.database import (
 from utils.settings import settings, loader, get_version
 from utils.telemetry import telemetry
 from helpers.exceptions import ApiError, TokenLimitError, GracefulExit
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    gpt_pilot_root = os.path.dirname(os.path.dirname(__file__))
+    venv_path = os.path.join(gpt_pilot_root, 'pilot-env')
+    requirements_path = os.path.join(gpt_pilot_root, 'requirements.txt')
+    if sys.prefix == sys.base_prefix:
+        venv_python_path = os.path.join(venv_path, 'scripts' if sys.platform == 'win32' else 'bin', 'python')
+        print('Python environment for GPT Pilot is not set up.')
+        print(f'Please create Python virtual environment: {sys.executable} -m venv {venv_path}')
+        print(f'Then install the required dependencies with: {venv_python_path} -m pip install -r {requirements_path}')
+    else:
+        print('Python environment for GPT Pilot is not completely set up.')
+        print(
+            f'Please run `{sys.executable} -m pip install -r {requirements_path}` to finish Python setup, and rerun GPT Pilot.')
+    sys.exit(-1)
+
+load_dotenv(override=True)
+
 
 def init():
     # Check if the "euclid" database exists, if not, create it
@@ -82,7 +83,7 @@ if __name__ == "__main__":
             run_exit_fn = False
 
             if ipc_client_instance is not None:
-                print({ 'db_data': get_created_apps_with_steps() }, type='info')
+                print({'db_data': get_created_apps_with_steps()}, type='info')
             else:
                 print('----------------------------------------------------------------------------------------')
                 print('app_id                                step                 dev_step  name')
@@ -102,6 +103,7 @@ if __name__ == "__main__":
 
         elif '--ux-test' in args:
             from test.ux_tests import run_test
+
             run_test(args['--ux-test'], args)
             run_exit_fn = False
         else:

@@ -1,16 +1,19 @@
 import re
-import requests
+
+import openai
 import os
 import sys
 import time
 import json
 import tiktoken
+from openai import OpenAI
+from openai.lib.azure import AzureOpenAI
 from prompt_toolkit.styles import Style
 
 from jsonschema import validate, ValidationError
 from utils.style import color_red, color_yellow
 from typing import List
-from const.llm import MAX_GPT_MODEL_TOKENS, API_CONNECT_TIMEOUT, API_READ_TIMEOUT
+from const.llm import MAX_GPT_MODEL_TOKENS
 from const.messages import AFFIRMATIVE_ANSWERS
 from logger.logger import logger, logging
 from helpers.exceptions import TokenLimitError, ApiKeyNotDefinedError, ApiError
@@ -157,12 +160,14 @@ def create_gpt_chat_completion(messages: List[dict], req_type, project,
     except TokenLimitError as e:
         raise e
     except Exception as e:
-        logger.error(f'The request to {os.getenv("ENDPOINT")} API for {model_provider}/{model_name} failed: %s', e, exc_info=True)
+        logger.error(f'The request to {os.getenv("ENDPOINT")} API for {model_provider}/{model_name} failed: %s', e,
+                     exc_info=True)
         print(color_red(f'The request to {os.getenv("ENDPOINT")} API failed with error: {e}. Please try again later.'))
         if isinstance(e, ApiError):
             raise e
         else:
             raise ApiError(f"Error making LLM API request: {e}") from e
+
 
 def delete_last_n_lines(n):
     for _ in range(n):
@@ -264,7 +269,8 @@ def retry_on_exception(func):
                     # If the specific error "context_length_exceeded" is present, simply return without retry
                     # spinner_stop(spinner)
                     n_tokens = get_tokens_in_messages_from_openai_error(err_str)
-                    print(color_red(f"Error calling LLM API: The request exceeded the maximum token limit (request size: {n_tokens}) tokens."))
+                    print(color_red(
+                        f"Error calling LLM API: The request exceeded the maximum token limit (request size: {n_tokens}) tokens."))
                     trace_token_limit_error(n_tokens, args[0]['messages'], err_str)
                     raise TokenLimitError(n_tokens, MAX_GPT_MODEL_TOKENS)
                 if "rate_limit_exceeded" in err_str or "rate_limit_error" in err_str:
@@ -328,12 +334,14 @@ def rate_limit_exceeded_sleep(e, err_str):
 
     logger.debug(f'Rate limited. Waiting {wait_duration_sec} seconds...')
 
-    if isinstance(e, ApiError) and hasattr(e, "response_json") and e.response_json is not None and "error" in e.response_json:
+    if isinstance(e, ApiError) and hasattr(e,
+                                           "response_json") and e.response_json is not None and "error" in e.response_json:
         message = e.response_json["error"]["message"]
     else:
         message = "Rate limited by the API (we're over 'tokens per minute' or 'requests per minute' limit)"
     print(color_yellow(message))
-    print(color_yellow(f"Retrying in {wait_duration_sec} second(s)... with extra buffer of: {extra_buffer_time} second(s)"))
+    print(color_yellow(
+        f"Retrying in {wait_duration_sec} second(s)... with extra buffer of: {extra_buffer_time} second(s)"))
     time.sleep(wait_duration_sec)
 
 
@@ -384,8 +392,7 @@ def stream_gpt_completion(data, req_type, project, model=None):
     lines_printed = 2
     gpt_response = ''
     buffer = ''  # A buffer to accumulate incoming data
-    expecting_json = None
-    received_json = False
+    expecting_json = True
 
     if 'functions' in data:
         expecting_json = data['functions']
@@ -422,46 +429,31 @@ def stream_gpt_completion(data, req_type, project, model=None):
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug('\n'.join([f"{message['role']}: {message['content']}" for message in data['messages']]))
 
-    if endpoint == 'AZURE':
-        # If yes, get the AZURE_ENDPOINT from .ENV file
-        endpoint_url = os.getenv('AZURE_ENDPOINT') + '/openai/deployments/' + model + '/chat/completions?api-version=2023-05-15'
-        headers = {
-            'Content-Type': 'application/json',
-            'api-key': get_api_key_or_throw('AZURE_API_KEY')
-        }
-    elif endpoint == 'OPENROUTER':
-        # If so, send the request to the OpenRouter API endpoint
-        endpoint_url = os.getenv('OPENROUTER_ENDPOINT', 'https://openrouter.ai/api/v1/chat/completions')
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + get_api_key_or_throw('OPENROUTER_API_KEY'),
-            'HTTP-Referer': 'https://github.com/Pythagora-io/gpt-pilot',
-            'X-Title': 'GPT Pilot'
-        }
-        data['max_tokens'] = MAX_GPT_MODEL_TOKENS
-        data['model'] = model
-    else:
-        # If not, send the request to the OpenAI endpoint
-        endpoint_url = os.getenv('OPENAI_ENDPOINT', 'https://api.openai.com/v1/chat/completions')
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + get_api_key_or_throw('OPENAI_API_KEY')
-        }
-        data['model'] = model
+    client = get_gpt_client(endpoint)
+
+    data['max_tokens'] = MAX_GPT_MODEL_TOKENS
+    data['model'] = model
 
     telemetry.set("model", model)
     token_count = get_tokens_in_messages(data['messages'])
     request_start_time = time.time()
 
-    response = requests.post(
-        endpoint_url,
-        headers=headers,
-        json=data,
-        stream=True,
-        timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
-    )
+    try:
+        # TODO: support non-streaming api
+        content = client.chat.completions.create(
+            messages=data['message'],
+            model=model,
+        ).choices[0].message.content
+        print(content, type='stream', end='', flush=True)
+        gpt_response += content
+        print('\n', type='stream')
 
-    if response.status_code == 401 and 'BricksLLM' in response.text:
+        telemetry.record_llm_request(
+            token_count + len(tokenizer.encode(gpt_response)),
+            time.time() - request_start_time,
+            is_error=False
+        )
+    except openai.AuthenticationError as e:
         print("", type='keyExpired')
         msg = "Trial Expired"
         key = os.getenv("OPENAI_API_KEY")
@@ -470,94 +462,26 @@ def stream_gpt_completion(data, req_type, project, model=None):
             msg += f"\n\n(using key ending in ...{key[-4:]}):"
         if endpoint:
             msg += f"\n(using endpoint: {endpoint}):"
-        msg += f"\n\nError details: {response.text}"
-        raise ApiError(msg, response=response)
-
-    if response.status_code != 200:
-        project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], response.text)
-        logger.info(f'problem with request (status {response.status_code}): {response.text}')
+        msg += f"\n\nError details: {e.message}"
+        raise ApiError(msg, response=e.response)
+    except openai.APIStatusError as e:
+        project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], e.response.text)
+        logger.info(f'problem with request (status {e.status_code}): {e.request}')
         telemetry.record_llm_request(token_count, time.time() - request_start_time, is_error=True)
-        raise ApiError(f"API responded with status code: {response.status_code}. Request token size: {token_count} tokens. Response text: {response.text}", response=response)
+        raise ApiError(
+            f"API responded with status code: {e.status_code}. "
+            f"Request token size: {token_count} tokens. "
+            f"Response text: {e.response.text}",
+            response=e.response)
+    except openai.APIError as e:
+        project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], e.body)
+        logger.info(f'problem with request : {e.message}')
+        telemetry.record_llm_request(token_count, time.time() - request_start_time, is_error=True)
+        raise ApiError(
+            f"API responded with: {e.body}. "
+            f"Request token size: {token_count} tokens. "
+            f"Error message: {e.message}")
 
-    # function_calls = {'name': '', 'arguments': ''}
-
-    for line in response.iter_lines():
-        # Ignore keep-alive new lines
-        if line and line != b': OPENROUTER PROCESSING':
-            line = line.decode("utf-8")  # decode the bytes to string
-
-            if line.startswith('data: '):
-                line = line[6:]  # remove the 'data: ' prefix
-
-            # Check if the line is "[DONE]" before trying to parse it as JSON
-            if line == "[DONE]":
-                continue
-
-            try:
-                json_line = json.loads(line)
-
-                if 'error' in json_line:
-                    logger.error(f'Error in LLM response: {json_line}')
-                    telemetry.record_llm_request(token_count, time.time() - request_start_time, is_error=True)
-                    raise ValueError(f'Error in LLM response: {json_line["error"]["message"]}')
-
-                if 'choices' not in json_line or len(json_line['choices']) == 0:
-                    continue
-
-                choice = json_line['choices'][0]
-
-                # if 'finish_reason' in choice and choice['finish_reason'] == 'function_call':
-                #     function_calls['arguments'] = load_data_to_json(function_calls['arguments'])
-                #     return return_result({'function_calls': function_calls}, lines_printed)
-
-                json_line = choice['delta']
-
-            except json.JSONDecodeError as e:
-                logger.error(f'Unable to decode line: {line} {e.msg}')
-                continue  # skip to the next line
-
-            # handle the streaming response
-            # if 'function_call' in json_line:
-            #     if 'name' in json_line['function_call']:
-            #         function_calls['name'] = json_line['function_call']['name']
-            #         print(f'Function call: {function_calls["name"]}')
-            #
-            #     if 'arguments' in json_line['function_call']:
-            #         function_calls['arguments'] += json_line['function_call']['arguments']
-            #         print(json_line['function_call']['arguments'], type='stream', end='', flush=True)
-
-            if 'content' in json_line:
-                content = json_line.get('content')
-                if content:
-                    buffer += content  # accumulate the data
-
-                    # If you detect a natural breakpoint (e.g., line break or end of a response object), print & count:
-                    if buffer.endswith('\n'):
-                        if expecting_json and not received_json:
-                            try:
-                                received_json = assert_json_response(buffer, lines_printed > 2)
-                            except:
-                                telemetry.record_llm_request(token_count, time.time() - request_start_time, is_error=True)
-                                raise
-                        # or some other condition that denotes a breakpoint
-                        lines_printed += count_lines_based_on_width(buffer, terminal_width)
-                        buffer = ""  # reset the buffer
-
-                    gpt_response += content
-                    print(content, type='stream', end='', flush=True)
-
-    print('\n', type='stream')
-
-    telemetry.record_llm_request(
-        token_count + len(tokenizer.encode(gpt_response)),
-        time.time() - request_start_time,
-        is_error=False
-    )
-
-    # if function_calls['arguments'] != '':
-    #     logger.info(f'Response via function call: {function_calls["arguments"]}')
-    #     function_calls['arguments'] = load_data_to_json(function_calls['arguments'])
-    #     return return_result({'function_calls': function_calls}, lines_printed)
     logger.info('<<<<<<<<<< LLM Response <<<<<<<<<<\n%s\n<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<', gpt_response)
     project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], gpt_response)
 
@@ -569,6 +493,31 @@ def stream_gpt_completion(data, req_type, project, model=None):
 
     new_code = postprocessing(gpt_response, req_type)  # TODO add type dynamically
     return return_result({'text': new_code}, lines_printed)
+
+
+def get_gpt_client(endpoint):
+    if endpoint == 'AZURE':
+        client = AzureOpenAI(
+            api_version="2023-05-15",
+            # get the AZURE_ENDPOINT from .ENV file
+            azure_endpoint=os.getenv('AZURE_ENDPOINT'),
+            api_key=get_api_key_or_throw('AZURE_API_KEY')
+        )
+    elif endpoint == 'OPENROUTER':
+        # If so, send the request to the OpenRouter API endpoint
+        endpoint_url = os.getenv('OPENROUTER_ENDPOINT', 'https://openrouter.ai/api/v1/chat/completions')
+        client = OpenAI(
+            base_url=endpoint_url.removesuffix("/v1/chat/completions"),
+            api_key=get_api_key_or_throw('OPENROUTER_API_KEY'),
+        )
+    else:
+        # If not, send the request to the OpenAI endpoint
+        endpoint_url = os.getenv('OPENAI_ENDPOINT', 'https://api.openai.com/v1/chat/completions')
+        client = OpenAI(
+            base_url=endpoint_url.removesuffix("/v1/chat/completions"),
+            api_key=get_api_key_or_throw('OPENAI_API_KEY')
+        )
+    return client
 
 
 def get_api_key_or_throw(env_key: str):
@@ -611,7 +560,7 @@ def load_data_to_json(string):
     return json.loads(fix_json(string))
 
 
-def stream_anthropic(messages, function_call_message, gpt_data, model_name = "claude-3-sonnet-20240229"):
+def stream_anthropic(messages, function_call_message, gpt_data, model_name="claude-3-sonnet-20240229"):
     try:
         import anthropic
     except ImportError as err:
@@ -638,11 +587,11 @@ def stream_anthropic(messages, function_call_message, gpt_data, model_name = "cl
 
     response = ""
     with client.messages.stream(
-        model=model_name,
-        max_tokens=4096,
-        temperature=0.5,
-        system=claude_system,
-        messages=claude_messages,
+            model=model_name,
+            max_tokens=4096,
+            temperature=0.5,
+            system=claude_system,
+            messages=claude_messages,
     ) as stream:
         for chunk in stream.text_stream:
             print(chunk, type='stream', end='', flush=True)

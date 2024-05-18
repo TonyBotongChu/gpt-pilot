@@ -22,7 +22,9 @@ requests==2.31.0
 six==1.16.0
 termcolor==2.3.0
 tiktoken==0.5.2
-urllib3==1.26.7
+urllib3==2.0.7
 wcwidth==0.2.8
 yaspin==2.5.0
 anthropic==0.19.1
+openai==1.28.0
+setuptools==69.5.1
